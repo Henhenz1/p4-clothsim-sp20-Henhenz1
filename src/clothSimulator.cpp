@@ -468,7 +468,7 @@ Matrix4f ClothSimulator::getProjectionMatrix() {
   double cam_near = camera.near_clip();
   double cam_far = camera.far_clip();
 
-  double theta = camera.v_fov() * M_PI / 360;
+  double theta = camera.v_fov() * PI / 360;
   double range = cam_far - cam_near;
   double invtan = 1. / tanf(theta);
 

@@ -1,0 +1,501 @@
+﻿<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+<style>
+  body {
+    padding: 100px;
+    width: 1000px;
+    margin: auto;
+    text-align: left;
+    font-weight: 300;
+    font-family: 'Open Sans', sans-serif;
+    color: #121212;
+  }
+  h1, h2, h3, h4 {
+    font-family: 'Source Sans Pro', sans-serif;
+  }
+</style>
+<title>CS 184 Mesh Editor</title>
+<meta http-equiv="content-type" content="text/html; charset=utf-8" />
+<link href="https://fonts.googleapis.com/css?family=Open+Sans|Source+Sans+Pro" rel="stylesheet">
+</head>
+
+
+<body>
+
+    <h1 align="middle">CS 184: Computer Graphics and Imaging, Spring 2020</h1>
+    <h1 align="middle">Project 4: Cloth Simulator</h1>
+    <h2 align="middle">Henry Zhang, CS184-ACV</h2>
+
+    <br /><br />
+
+    <h2 align="middle">Overview</h2>
+    <p>
+        In this project we implemented a cloth simulator capable of simulating physical interactions on a patch of cloth, as well as incorporating 
+        collisions with basic geometries such as spheres and planes, self-collision, and a variety of shaders.</p>
+
+    <h2 align="middle">Part 1: Masses and springs</h2>
+    <p>
+        The first step to simulating our cloth is to create the cloth representation as a grid of point masses and springs. A Cloth object stores this
+        information in two vectors that hold pointers to PointMass and Spring objects. The vectors are populated using Cloth::buildGrid(). To start, the
+        function caches all possible x and y PointMass coordinates in cloth space into two separate vectors using known information about the number of
+        points along each dimension and the overall height and width of the cloth. It then uses two nested for loops (iterating on the index of the point
+        in its dimension) to populate the PointMass vector appropriately. The indices from the for loops is used to look up whether the current point is
+        pinned using find() on the Cloth's <i>pinned</i> vector, which holds integer vectors representing grid indices of pinned (non-moving) PointMasses.
+        PointMasses are emplaced differently depending on their orientation, which is stored in a Cloth enum. If the cloth is horizontal, the PointMasses
+        vary across the XZ plane and all have an initial Y coordinate of 1 in world space. However, if the cloth is vertical, the PointMasses vary across
+        the XY plane and have a random Z coordinate from -0.001 to 0.001 in order to allow the cloth to crumple on itself.
+    </p>
+    <p>
+        Once all PointMasses have been initialized properly, the function populates the Spring vector in order to represent the various structural,
+        shearing, and bending constraints between the cloth's PointMasses. A Spring constructor takes the addresses of the two PointMasses it connects,
+        as well as an enum value representing the type of constraint it represents. A for loop iterates through all objects in the PointMass vector and
+        adds half of the possible Springs that connect to that PointMass, which prevents the addition of duplicate Springs. For each PointMass, the following
+        constraint Springs are added where possible:
+        <ul>
+            <li>Structural constraints are added connecting the current PointMass to the PointMasses to the left and above it.</li>
+            <li>Shearing constraints are added connecting the current PointMass to the PointMasses to the diagonal upper left and diagonal upper right of it.</li>
+            <li>Bending constraints are added connecting the current PointMass to the PointMasses two to the left and two above it.</li>
+        </ul>
+        Since some of these cannot be added for PointMasses near the edges of the cloth, the function converts the current loop index into grid indices, which
+        can be easily used to determine if a point is too close to the left or top edges of the cloth.
+    </p>
+    <p>
+        The following images show the wireframe of <i>pinned2.json</i> in the simulator. Lines represent springs connecting point masses.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/1-1.png" align="middle" width="400" />
+                    <figcaption align="center">Wireframe with structural and bending constraints.</figcaption>
+                </td>
+                <td>
+                    <img src="images/1-2.png" align="middle" width="400" />
+                    <figcaption align="center">Wireframe with only shearing constraints.</figcaption>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <img src="images/1-3.png" align="middle" width="400" />
+                    <figcaption align="center">Wireframe with all constraints.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+
+    <h2 align="middle">Part 2: Simulation via numerical integration</h2>
+    <p>
+        The next step is to simulate movement of the cloth model. Besides external forces such as gravity which affect all point masses in the
+        cloth equally, the model also experiences spring correction forces between point masses which keep the cloth together and are computed
+        based on the positions of connected point masses relative to each other. The <i>simulate()</i> function calculates and applies movement
+        to the cloth at every time step. First, the total force acting on each point mass is calculated as a sum of the external forces and spring
+        correction forces acting on it. The former is calculated using <i>external_accelerations</i>, a vector of Vector3D objects which is supplied
+        to the function as an argument, and the latter is calculated using Hooke's law.
+    </p>
+    <p>
+        Every PointMass contains a Vector3D which is used to store the sum of its applied forces at each time step. At the beginning of each
+        <i>simulate()</i> call, these are first zeroed out and then set equal to the total external forces. The function then iterates through
+        each spring in the wireframe and (for springs whose constraint type is enabled) calculates the force applied to the masses it connects
+        using the positions of those masses, and the Spring's rest length and spring constant. This force is applied to one of the masses, and an
+        equal and opposite force is applied to the other. For bending springs, only 20% of the force is applied because bending constraints are
+        weaker than structural and shearing constraints.
+    </p>
+    <p>
+        The calculated forces are then used to update the positions of each unpinned point mass using Verlet integration. Given a point mass's
+        current position, velocity, and acceleration, Verlet integration calculates the point mass's new position at a time interval dt later as:
+    </p>
+    <center><img src="images/verlet.png" align="middle" width="600" /></center>
+    <p>
+        Each PointMass stores its position at the previous timestep x<sub>t-dt</sub> in addition to its current position, which allows the velocity
+        term v<sub>t</sub> * dt to be approximated as x<sub>t</sub> - x<sub>t-dt</sub>. The velocity term is also multiplied by a damping term (1-d)
+        to simulate loss of energy due to friction, air resistance, etc. Acceleration can be calculated by dividing the forces acting on a point mass
+        by its mass. The final position update equation is thus
+    </p>
+    <center><img src="images/verlet-update.png" align="middle" width="600" /></center>
+    <p>
+        As a final step, we apply the constraint that springs may deform by no more than 10% of their resting length, in order to prevent
+        unreasonably large stretching of the cloth. For each spring, we check if the distance between the attached point masses is too long, and update
+        their positions if so, applying half the correction to each. If one of the point masses is pinned, the entire correction is applied to the
+        unpinned point mass.
+    </p>
+    <center><img src="images/2.png" align="middle" /></center>
+    <figcaption align="center"><i>pinned4.json</i> at rest.</figcaption>
+    <p>
+        We can make a number of observations of the cloth's behavior when its density, spring constant, and damping are changed. We use
+        <i>pinned2.json</i> as an example, and vary in orders of magnitude when possible. If the cloth's density or spring constant is
+        taken to an extreme, the cloth vanishes and the simulation breaks. The color of the cloth represents the direction of the normal vector at
+        that point; green locations point directly upwards.
+    </p>
+    <center><img src="images/2-base.png" align="middle" /></center>
+    <figcaption align="center"><i>pinned2.json</i> at rest.</figcaption>
+    <p>
+        As the cloth falls, we observe diagonal folds that ripple from the pinned corners to the free end of the cloth. At rest, the top
+        edge of the cloth sags somewhat, and the top corners are creased.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/2-high-density.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 10x density.</figcaption>
+                </td>
+                <td>
+                    <img src="images/2-low-ks.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 0.1x spring constant.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        When density is increased by a factor of 10, the top edge sags more, and an extra wrinkle appears as the cloth folds on itself an
+        additional time. When the cloth falls, the diagonal ripples that originate at the pinned corners are slightly stronger, as well as the
+        ripples that begin at the free end of the cloth when it hits its nadir. The same effect can be achieved by reducing the spring constant
+        by a factor of 10, which makes intuitive sense: denser cloth particles and weaker corrective spring forces will both lead to more
+        deformation of the cloth as it falls.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/2-very-high-density.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 100x density.</figcaption>
+                </td>
+                <td>
+                    <img src="images/2-very-low-ks.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 0.01x spring constant.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        With another factor of 10, the cloth sags even more, but also begins to destabilize. Ripples appear everywhere, even when the cloth
+        appears to have come to rest. Previously existing ripples also intensify.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/2-low-density.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 0.1x density.</figcaption>
+                </td>
+                <td>
+                    <img src="images/2-high-ks.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 10x spring constant.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        On the other hand, when density is decreased or spring constant is increased by a factor of 10, the cloth becomes more planar.
+        Ripples are weaker, and the final resting state of the cloth is noticeably less creased than the original cloth. The bottom edge
+        also remains relatively straight as it falls, whereas the high density/low spring constant cloth's bottom edge curves as it reaches
+        the end of its movement due to the diagonal ripples from the pinned corners.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/2-very-low-density.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 0.01x density.</figcaption>
+                </td>
+                <td>
+                    <img src="images/2-very-high-ks.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 100x spring constant.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        When density is too low or spring constant is too high, the cloth ceases to obey conventional laws of physics and begins spinning
+        rapidly about the axis formed by the pinned points, appearing to implode continuously. Even if parameters are later restored to
+        normal levels, the cloth usually experiences some uncorrectable self-collision that prevents the cloth from returning to its original
+        geometry and requires the simulation to be completely reset. This appears to be caused by a positive feedback loop of overcorrection
+        when cloth particles are too light or spring forces are too strong (or a combination of both).
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/2-no-damping.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with damping set to 0.</figcaption>
+                </td>
+                <td>
+                    <img src="images/2-low-damping.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with damping set to 0.1%.</figcaption>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <img src="images/2-high-damping.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with damping set to 1%.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        The effects of damping are more straightforward. By default, damping is set to 0.2%, but increasing or decreasing it will change
+        the time the cloth takes to come to rest. When damping is turned off entirely, the cloth does not stop upon reaching the original
+        resting orientation, but continues to swing upwards to the original height it started to fall at. The free corners of the cloth
+        exhibit a larger range of motion compared to when damping is on, and the cloth oscillates indefinitely. With low damping, the cloth
+        swings back and forth a few times but eventually comes to a halt. When damping is set to its maximum value of 1%, the cloth falls
+        very slowly, as if through molasses, barely rippling at all.
+    </p>
+
+    <h2 align="middle">Part 3: Handling collisions with other objects</h2>
+    <p>
+        To make the cloth simulation more interesting, we include collision handling to spheres and planes. If the update calculated in the
+        previous step would move a point mass across the boundary of a sphere or plane, we apply a correction so that it does not, and
+        additionally account for friction by scaling the correction vector down a small amount. The <i>simulate()</i> function takes a vector
+        of pointers to CollisionObjects (spheres or planes, in our case) as an argument. Within each <i>simulate()</i> call, we check each
+        point mass for collision with all existing CollisionObjects and handle it accordingly.
+    </p>
+    <p>
+        The correction vector applied to a point mass involved in a collision bumps the point mass to near the surface of the object where
+        they collided. To calculate the point mass's new position, we find the tangent point (i.e. where the point mass should have intersected
+        the object), compute the correction needed to be applied to the point mass's previous position in order to reach the tangent point, and
+        finally scale the correction vector down by the friction factor and update the new position accordingly.
+    </p>
+    <p>
+        For spheres, we can use the distance between the point mass's position and the sphere's origin to easily check if intersection has occured.
+        We find the tangent point by extending the line connecting the point mass and the sphere's origin, and the correction vector is found by
+        simple vector subtraction.
+    </p>
+    <center><img src="images/3-5000.png" align="middle" /></center>
+    <figcaption align="center"><i>sphere.json</i> at rest with default parameters.</figcaption>
+    <p>
+        The cloth comes to a halt on top of the sphere above, and creases in several places as the square geometry attempts to conform to the
+        shape of the sphere. The cloth splays out slightly due to the stiffness of the cloth.
+    </p>
+    <center><img src="images/3-500.png" align="middle" /></center>
+    <figcaption align="center"><i>sphere.json</i> at rest with ks=500.</figcaption>
+    <p>
+        With a weaker spring constant, the cloth creases in many more places as it hangs off the sphere. Since the cloth is less stiff, the
+        free ends hang more vertically than they did with the larger spring constant.
+    </p>
+    <center><img src="images/3-50000.png" align="middle" /></center>
+    <figcaption align="center"><i>sphere.json</i> at rest with ks=50000.</figcaption>
+    <p>
+        When the spring constant is stronger, the cloth resists creasing, and only folds in a few places. It splays out much more than either of
+        the two other simulations, since the increased spring constant prevents the cloth masses from moving as far.
+    </p>
+    <p>
+        Planes are slightly trickier. To find the tangent point, we calculate the vector between the point mass and the point defining the plane,
+        project that onto the normal vector defining the plane, and subtract the result (the shortest vector between the point mass and the plane)
+        from the position of the point mass. Then, since we want to move the point mass to a location slightly above the plane, we calculate this
+        position by subtracting the plane's normal vector scaled by a provided constant SURFACE_OFFSET from the tangent point. We then compute the
+        required correction vector, scale it down by friction, and update the point mass's position, as for spheres.
+    </p>
+    <center><img src="images/3-plane.png" align="middle" /></center>
+    <figcaption align="center"><i>plane.json</i> at rest with default parameters.</figcaption>
+
+    <h2 align="middle">Part 4: Handling self-collisions</h2>
+    <p>
+        In some cases, the cloth may fall onto itself. If the simulator has no way of handling self-collisions, the cloth will not behave appropriately
+        in these cases. This can be demonstrated in <i>selfCollision.json</i>.
+    </p>
+    <center><img src="images/4-inf.png" align="middle" /></center>
+    <figcaption align="center">Peering into the infinite.</figcaption>
+    <p>
+        We may attempt to implement this by following the same technique as we did for CollisionObjects, but such an approach would require us to
+        iterate over all possible pairs of point masses and check for collision, which is too inefficient for most real-time simulations. We instead
+        simplify the problem by implementing spatial hashing; we divide the global space into identical 3D box volumes and sort all point masses into
+        buckets based on the volume they occupy. This allows us to check each point mass against only those point masses within some distance of it,
+        and ignore those further away. We build the spatial hash map at every time step, and use it to apply repulsive correction forces to point masses
+        if they are too close to each other, as in the previous part.
+    </p>
+    <p>
+        We may observe <i>selfCollision.json</i> as before.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/4-base-1.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth beginning to fall onto the plane.</figcaption>
+                </td>
+                <td>
+                    <img src="images/4-base-2.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth continuing to fall.</figcaption>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <img src="images/4-base-3.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth finished falling.</figcaption>
+                </td>
+                <td>
+                    <img src="images/4-base-4.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth smoothing itself out.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        Because our model does not incorporate damping spring forces, the cloth continues to flatten out even after it appears to have totally
+        fallen.
+    </p>
+    <p>
+        We may again vary our density and spring constant parameters to observe differences in behavior.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/4-high-density.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 10x density.</figcaption>
+                </td>
+                <td>
+                    <img src="images/4-low-ks.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 0.1x spring constant.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        When density is increased or spring constant is decreased, the cloth crumples much more on itself as it falls. In these cases, the
+        weight of the cloth is too much for the springs to push, and the resting state is more compact.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/4-low-density.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 0.1x density.</figcaption>
+                </td>
+                <td>
+                    <img src="images/4-high-ks.png" align="middle" width="400" />
+                    <figcaption align="center">Cloth with 10x spring constant.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        Conversely, when density is decreased or spring constant is increased, the cloth makes much neater folds as it falls to the plane.
+        The corrective spring forces push the cloth out from under itself as it falls, resulting in a wider footprint at rest.
+    </p>
+
+    <h2 align="middle">Part 5: Shaders</h2>
+    <p>
+        A shader program accelerates part of the renderline pipeline by running them on GPU. A GPU contains hundreds of processing cores
+        able to compute large numbers of simple operations in parallel, which makes operations like raytracing much faster than would be
+        possible by a CPU, which has fewer cores specialized for more complex tasks. Shaders output single 4D vectors.
+        <ul>
+            <li>
+                Vertex shaders modify the geometry of the mesh to be rendered by changing vertex positions or normal vectors.
+            </li>
+            <li>
+                Fragment shaders use geometric attributes of a rasterized fragment to output a color.
+            </li>
+        </ul>
+        Our shader programs link a vertex shader to a fragment shader, with the vertex shader output becoming the fragment shader input.
+        In this part we incorporate shaders for Blinn-Phong shading, texture shading, bump mapping, displacement mapping, and mirror shading.
+    </p>
+    <p>
+        The Blinn-Phong shading model combines three forms of reflective lighting:
+        <ul>
+            <li>
+                ambient light, which illuminates objects uniformly based on the object's surroundings;
+            </li>
+            <li>
+                diffuse light, formed when incoming light rays are scattered at many angles, creating a dull appearance;
+            </li>
+            <li>
+                and specular light, formed when incoming light rays are mostly reflected in a single direction, creating a shiny highlight.
+            </li>
+        </ul>
+        Each form of light has an associated coefficient which varies based on the shininess of the object and brightness of the
+        surroundings. Because ambient light illuminates objects uniformly, it does not incorporate a ray direction vector in its
+        calculation, in contrast with diffuse and specular lighting. The resulting image appears more realistic than an image
+        rendered with any of the individual lighting components alone would. A fragment shader alone can calculate the vector
+        equations required to render the object properly; no significant changes are made with the vertex shader.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/5-ambient.png" align="middle" width="400" />
+                    <figcaption align="center">Ambient component.</figcaption>
+                </td>
+                <td>
+                    <img src="images/5-diffuse.png" align="middle" width="400" />
+                    <figcaption align="center">Diffuse component.</figcaption>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <img src="images/5-specular.png" align="middle" width="400" />
+                    <figcaption align="center">Specular component.</figcaption>
+                </td>
+                <td>
+                    <img src="images/5-bp.png" align="middle" width="400" />
+                    <figcaption align="center">Full Blinn-Phong shading.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        Texture mapping allows an existing texture asset (an image or photo) to be drawn onto the object surface. Again, a fragment shader
+        can easily accomplish this in one instruction.
+    </p>
+    <center><img src="images/5-custom.png" align="middle" /></center>
+    <figcaption align="center">A familiar fuzzball.</figcaption>
+    <p>
+        Bump mapping can give detail to lit objects by modifying their surface normals using a height map stored in a texture. Though it
+        doesn't change the object's geometry (in the sense that no vertices are moved, created, or deleted), the modified normals cause
+        light to interact differently, so more detail is shown in the light's reflections. This is done using a fragment shader.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/5-bump-sphere.png" align="middle" width="400" />
+                    <figcaption align="center">Bump mapping on the sphere.</figcaption>
+                </td>
+                <td>
+                    <img src="images/5-bump-cloth.png" align="middle" width="400" />
+                    <figcaption align="center">Bump mapping on the cloth.</figcaption>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <img src="images/5-bump-cloth-initial.png" align="middle" width="400" />
+                    <figcaption align="center">Bump mapping on the cloth in midair.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+    <p>
+        Displacement mapping uses a vertex shader to change the vertices' positions so they reflect the height map (scaled by a
+        variable). It uses the same fragment shader as bumpmapping, but also changes the geometry of the object. The resolution
+        of the object will affect the result of the displacement mapping; if the resolution is too low, the changes to the vertices
+        may not accurately reflect the map or may result in unintended blockiness.
+    </p>
+    <center><img src="images/5-displacement-base.png" align="middle" /></center>
+    <figcaption align="center">Displacement mapping on the sphere.</figcaption>
+    <center><img src="images/5-displacement-16.png" align="middle" /></center>
+    <figcaption align="center">Displacement mapping on a low-res sphere.</figcaption>
+    <center><img src="images/5-displacement-128.png" align="middle" /></center>
+    <figcaption align="center">Displacement mapping on a high-res sphere.</figcaption>
+    <p>
+        If we want to simulate the appearance of a mirror, we can use an environment map to sample radiance. We first compute an
+        outgoing ray using a fragment's position and the camera position. We can then reflect this ray about the normal at the fragment
+        to get an incoming ray, which we can finally use to sample the environment map.
+    </p>
+    <div align="center">
+        <table style="width=100%">
+            <tr>
+                <td>
+                    <img src="images/5-mirror-1.png" align="middle" width="400" />
+                    <figcaption align="center">Mirror shader on the cloth.</figcaption>
+                </td>
+                <td>
+                    <img src="images/5-mirror-2.png" align="middle" width="400" />
+                    <figcaption align="center">Mirror shader on the sphere.</figcaption>
+                </td>
+            </tr>
+        </table>
+    </div>
+</body>
+</html>

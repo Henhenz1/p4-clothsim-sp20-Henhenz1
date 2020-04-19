@@ -32,7 +32,73 @@ Cloth::~Cloth() {
 
 void Cloth::buildGrid() {
   // TODO (Part 1): Build a grid of masses and springs.
+    vector<double> widths, heights;
+    double deltaW = width / (num_width_points - 1);
+    double deltaH = height / (num_height_points - 1);
+    bool currPin = false;
+    vector<double> pos;
+    vector<int> indices;
 
+    uniform_real_distribution<double> unif(-0.001, 0.001); // from https://stackoverflow.com/questions/2704521/generate-random-double-numbers-in-c
+    default_random_engine re;
+    double vert_z;
+
+    for (int i = 0; i < num_width_points; i++) {
+        widths.push_back(i * deltaW);
+    }
+    for (int j = 0; j < num_height_points; j++) {
+        heights.push_back(j * deltaH);
+    }
+
+    for (int j = 0; j < num_height_points; j++) {
+        for (int i = 0; i < num_width_points; i++) {
+            indices.clear();
+            indices.push_back(i);
+            indices.push_back(j);
+            pos.clear();
+            pos.push_back(widths[i]);
+            pos.push_back(heights[j]);
+            currPin = find(pinned.begin(), pinned.end(), indices) != pinned.end();
+            if (orientation == HORIZONTAL) {
+                point_masses.emplace_back(Vector3D(pos[0], 1, pos[1]), currPin);
+            }
+            else {
+                vert_z = unif(re);
+                point_masses.emplace_back(Vector3D(pos[0], pos[1], vert_z), currPin);
+            }
+        }
+    }
+    
+
+    for (int i = 0; i < point_masses.size(); i++) {
+        int x = i % num_width_points;
+        int y = floor(i / num_width_points);
+        PointMass* curr = &point_masses[i];
+
+        // structural constraints
+        if (x != 0) {
+            springs.emplace_back(curr, curr - 1, STRUCTURAL);                           // left
+        }
+        if (y != 0) {
+            springs.emplace_back(curr, curr - num_width_points, STRUCTURAL);            // above
+        }
+
+        // shearing constraints
+        if (x >= 1 && y >= 1) {
+            springs.emplace_back(curr, curr - 1 - num_width_points, SHEARING);          // diagonal upper left
+        }
+        if (x < num_width_points - 1 && y >= 1) {
+            springs.emplace_back(curr, curr - num_width_points + 1, SHEARING);          // diagonal upper right
+        }
+
+        // bending constraints
+        if (x >= 2) {
+            springs.emplace_back(curr, curr - 2, BENDING);                              // two to left
+        }
+        if (y >= 2) {
+            springs.emplace_back(curr, curr - num_width_points * 2, BENDING);           // two above
+        }
+    }
 }
 
 void Cloth::simulate(double frames_per_sec, double simulation_steps, ClothParameters *cp,
@@ -40,22 +106,90 @@ void Cloth::simulate(double frames_per_sec, double simulation_steps, ClothParame
                      vector<CollisionObject *> *collision_objects) {
   double mass = width * height * cp->density / num_width_points / num_height_points;
   double delta_t = 1.0f / frames_per_sec / simulation_steps;
+  Vector3D currForce;
+
+  // Clear previous forces
+  for (PointMass &p : point_masses) {
+      p.forces *= 0;
+  }
+
 
   // TODO (Part 2): Compute total force acting on each point mass.
+  Vector3D totExt;
+  for (int j = 0; j < external_accelerations.size(); j++) {
+      totExt += external_accelerations[j] * mass;
+  }
+  for (PointMass& p : point_masses) {
+      p.forces += totExt;
+  }
+
+  for (int i = 0; i < springs.size(); i++) {
+      Spring s = springs[i];
+      e_spring_type t = s.spring_type;
+      if (t == STRUCTURAL && !cp->enable_structural_constraints) {
+          continue;
+      }
+      else if (t == SHEARING && !cp->enable_shearing_constraints) {
+          continue;
+      }
+      else if (t == BENDING && !cp->enable_bending_constraints) {
+          continue;
+      }
+      Vector3D dist = s.pm_a->position - s.pm_b->position;
+      currForce = cp->ks * (dist / dist.norm()) * (dist.norm() - s.rest_length);
+      if (t == BENDING) {
+          currForce *= 0.2;
+      }
+      s.pm_a->forces -= currForce;
+      s.pm_b->forces += currForce;
+  }
 
 
   // TODO (Part 2): Use Verlet integration to compute new point mass positions
-
+  for (PointMass& pm : point_masses) {
+      if (pm.pinned) {
+          continue;
+      }
+      Vector3D newPos = pm.position + (1 - (cp->damping / 100)) * (pm.position - pm.last_position) + (pm.forces / mass) * pow(delta_t, 2);
+      pm.last_position = pm.position;
+      pm.position = newPos;
+  }
 
   // TODO (Part 4): Handle self-collisions.
-
+  build_spatial_map();
+  for (PointMass& pm : point_masses) {
+      self_collide(pm, simulation_steps);
+  }
 
   // TODO (Part 3): Handle collisions with other primitives.
-
+  for (PointMass& pm : point_masses) {
+      for (CollisionObject* co : *collision_objects) {
+          co->collide(pm);
+      }
+  }
 
   // TODO (Part 2): Constrain the changes to be such that the spring does not change
   // in length more than 10% per timestep [Provot 1995].
+  for (int i = 0; i < springs.size(); i++) {
+      Spring s = springs[i];
+      Vector3D stretch_dist = s.pm_a->position - s.pm_b->position;
+      if (stretch_dist.norm() > s.rest_length * 1.1) {
+          double excess_length = stretch_dist.norm() - s.rest_length * 1.1;
+          stretch_dist.normalize();
+          stretch_dist *= excess_length;
+          if (s.pm_a->pinned) {
+              s.pm_b->position += stretch_dist;
+          }
+          else if (s.pm_b->pinned) {
+              s.pm_a->position -= stretch_dist;
+          }
+          else {
+              s.pm_a->position -= stretch_dist * 0.5;
+              s.pm_b->position += stretch_dist * 0.5;
+          }
+      }
 
+  }
 }
 
 void Cloth::build_spatial_map() {
@@ -65,18 +199,49 @@ void Cloth::build_spatial_map() {
   map.clear();
 
   // TODO (Part 4): Build a spatial map out of all of the point masses.
-
+  for (PointMass& pm : point_masses) {
+      float key = hash_position(pm.position);
+      if (map.find(key) == map.end()) {
+          map[key] = new vector<PointMass*>();
+      }
+      map[key]->push_back(&pm);
+  }
 }
 
 void Cloth::self_collide(PointMass &pm, double simulation_steps) {
   // TODO (Part 4): Handle self-collision for a given point mass.
-
+    vector<PointMass*> candidates = *map[hash_position(pm.position)];
+    if (candidates.size() == 1) {
+        return;
+    }
+    Vector3D corr = Vector3D(0, 0, 0);
+    int num_vec = 0;
+    for (PointMass* c : candidates) {
+        Vector3D diff = c->position - pm.position;
+        if (diff.norm() == 0) {
+            continue;
+        }
+        else if (diff.norm() <= 2 * thickness) {
+            corr -= diff.unit() * (2 * thickness - diff.norm());
+            num_vec += 1;
+        }
+    }
+    if (num_vec == 0) {
+        return;
+    }
+    corr /= num_vec;
+    pm.position += corr / simulation_steps;
 }
 
 float Cloth::hash_position(Vector3D pos) {
   // TODO (Part 4): Hash a 3D position into a unique float identifier that represents membership in some 3D box volume.
-
-  return 0.f; 
+    double w = 3 * width / num_width_points;
+    double h = 3 * height / num_height_points;
+    double t = max(w, h);
+    int x = floor(pos.x / w);
+    int y = floor(pos.y / h);
+    int z = floor(pos.z / t);
+  return x * 31*31 + y * 31 + z; 
 }
 
 ///////////////////////////////////////////////////////
